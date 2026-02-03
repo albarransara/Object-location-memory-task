@@ -76,6 +76,7 @@ def parse_raw_file(path):
                         i += 1
                         
                     obj["final_placement"] = obj["placements"][-1] if obj["placements"] else None
+                    obj["first_placement"] = obj["placements"][0] if obj["placements"] else None
                     current_trial.append(obj)
                     
                 except:
@@ -157,25 +158,50 @@ def process_folder_raw_data(path, output_path, threshold_px=DIST_THRESHOLD_PX):
 
 
 """ -------- Process task results --------"""
+# Auxiliar function to calculate bestfit scores
+def calculate_bestfit_distances(trial_objects):
+    targets = [(o["correct_x"], o["correct_y"]) for o in trial_objects]
+    placed = [(o["final_placement"]["placed_x"], o["final_placement"]["placed_y"]) for o in trial_objects]
+    
+    # Create cost matrix
+    cost = np.zeros((len(targets), len(placed)), dtype=float)
+    for i, (tx, ty) in enumerate(targets):
+        for j, (px, py) in enumerate(placed):
+            cost[i, j] = distance.euclidean((tx, ty), (px, py)) * SCALE_FACTOR
+            
+    # Solve matching problem - hungarian algorithm 
+    row_ind, col_ind = linear_sum_assignment(cost)
+    
+    # Return distances and the column indices (placements) assigned to each row (target)
+    matched_distances = np.zeros(len(targets))
+    matched_distances[row_ind] = cost[row_ind, col_ind]
+    
+    return matched_distances, col_ind
+    
 # Process task results at object-level
 def process_object_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
     rows = []
-    for obj in trial_objects:
+    bestfit_dists, _ = calculate_bestfit_distances(trial_objects)
+    
+    for i, obj in enumerate(trial_objects):
         placements = obj.get("placements", [])
         
         coords_all = [(p["placed_x"], p["placed_y"]) for p in placements]
         times_all = [p["time_ms"] for p in placements]
         px = obj["final_placement"]["placed_x"]
         py = obj["final_placement"]["placed_y"]
-        time_ms = obj["final_placement"]["time_ms"]
-        dist =  distance.euclidean((px, py), (obj["correct_x"], obj["correct_y"])) * SCALE_FACTOR
+        final_time_ms = obj["final_placement"]["time_ms"]
+        first_time_ms = obj["first_placement"]["time_ms"]
+        dist =  distance.euclidean((px, py), (obj["correct_x"], obj["correct_y"])) * SCALE_FACTOR # Absolute error distance 
+        bestfit_dist = bestfit_dists[i] # Bestfit error distance
         correct = int(dist <= threshold_px)
 
         rows.append({
             "object index": obj["index"], "object name": obj["obj_name"],
             "correct x": obj["correct_x"], "correct y": obj["correct_y"],
             "final placement x": px, "final placement y": py,
-            "final time (ms)": time_ms, "absolute distance": dist, "correct result": correct,
+            "final time (ms)": final_time_ms, "first time (ms)": first_time_ms, "absolute distance": dist,
+            "bestfit_dist":bestfit_dist, "correct result": correct,
             "number placements": len(placements), "all placements": coords_all, "all times": times_all})
 
     return pd.DataFrame(rows)
@@ -206,7 +232,7 @@ def process_trial_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
 
     # Get permutations
     perm = list(range(len(trial_objects)))
-    for r, c in zip(row_ind, col_ind):¡
+    for r, c in zip(row_ind, col_ind):
         perm[r] = placed_indices[c]
         
     # Get swaps and subs 
@@ -227,3 +253,56 @@ def process_trial_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
             "permutations": "".join(map(str, perm)),
             "swaps": swaps, "substitutions": subs, "repetitions": np.sum([len(o["placements"]) for o in trial_objects])}])
 
+
+""" -------- Analysis and graph functions --------"""
+
+# Averages each trial condition results of a specific variable, e.g. absolute error
+def compute_trial_type_averages(folder_path, variable):
+    csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
+
+    dfs = []
+    for f in csv_files:
+        df = pd.read_csv(f)
+        dfs.append(df)
+
+    all_data = pd.concat(dfs, ignore_index=True)
+    all_data["trial type"] = all_data["trial type"].replace({"DB": "B"})  # Combine B and DB
+    all_data = all_data[~all_data["trial type"].isin(["C", "P"])]    # Exclude C and P trials
+
+    summary = (all_data .groupby("trial type", as_index=False)
+        .agg(
+            avg_absolute_error=(variable, "mean"),
+            std_absolute_error=(variable, "std"),
+            n_trials=("trial type", "count")
+        ).sort_values("trial type")    )
+
+    return summary
+
+def load_trial_level_data(folder_path, group_label):
+    csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
+    if len(csv_files) == 0:
+        raise ValueError(f"No CSV files found in {folder_path}")
+
+    dfs_obj, dfs_trials = [], []
+    for f in csv_files:
+        filename = os.path.basename(f).lower()
+        match = re.search(r"\d+", filename) # Extract participant ID from filename
+        if match is None:
+            raise ValueError(f"Cannot extract participant ID from: {filename}")
+
+        participant_id = int(match.group())
+        df = pd.read_csv(f)
+        df["ID"] = participant_id
+        df["group"] = group_label
+        if "obj" in f:
+            dfs_obj.append(df)
+        elif "trials" in f:
+            dfs_trials.append(df)
+
+    data_obj = pd.concat(dfs_obj, ignore_index=True)
+    data_obj["trial type"] = data_obj["trial type"].replace({"DB": "B"})
+    data_obj = data_obj[~data_obj["trial type"].isin(["C", "P"])]
+    data_trials = pd.concat(dfs_trials, ignore_index=True)
+    data_trials["trial type"] = data_trials["trial type"].replace({"DB": "B"})
+    data_trials = data_trials[~data_trials["trial type"].isin(["C", "P"])]
+    return data_obj,data_trials
