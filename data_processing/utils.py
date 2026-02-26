@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 from scipy.spatial import distance
 from scipy.optimize import linear_sum_assignment
+from scipy.spatial import Voronoi, voronoi_plot_2d
+import matplotlib.pyplot as plt
 
 TRIAL_SEPARATOR = ['2', '0', '0']
 END_OBJECT = (-99, -99, -99)
@@ -153,8 +155,10 @@ def process_folder_raw_data(path, output_path, threshold_px=DIST_THRESHOLD_PX):
                 print(f"No valid data for {pid}")
                 continue
                 
-            pd.concat(obj_dfs).to_csv(directory / f"{pid}_obj.csv", index=False)
-            pd.concat(trial_dfs).to_csv(directory / f"{pid}_trials.csv", index=False)
+            #pd.concat(obj_dfs).to_csv(directory / f"{pid}_obj.csv", index=False)
+            #pd.concat(trial_dfs).to_csv(directory / f"{pid}_trials.csv", index=False)
+            pd.concat(obj_dfs).to_pickle(directory / f"{pid}_obj.csv")
+            pd.concat(trial_dfs).to_pickle(directory / f"{pid}_trials.csv")
 
 
 """ -------- Process task results --------"""
@@ -177,6 +181,16 @@ def calculate_bestfit_distances(trial_objects):
     matched_distances[row_ind] = cost[row_ind, col_ind]
     
     return matched_distances, col_ind
+
+# Auxiliar function to define neighbouring areas 
+def neigborhood_areas(trial_objects):
+    targets = [[o["correct_x"], o["correct_y"]] for o in trial_objects]
+    boundary = [0, 1, 0, 1]
+
+    if len(targets) == 2: # skip training trials since they only have 2 objects
+        return [] 
+
+    return Voronoi(targets)  # Compute Vornoi Diagram to extract the neighboorhood area of each object
     
 # Process task results at object-level
 def process_object_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
@@ -207,53 +221,104 @@ def process_object_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
 
     return pd.DataFrame(rows)
     
-# Process task results at trial-level
-def process_trial_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
-    targets = [(o["correct_x"], o["correct_y"]) for o in trial_objects]
-    placed = []
-    placed_indices = []
-    abs_errors = []
-    final_times = []
+# # Process task results at trial-level
+# def process_trial_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
+#     """Process results at the trial level using bestfit and neighborhood logic."""
+#     bestfit_dists, col_ind = calculate_bestfit_distances(trial_objects)
+#     abs_errors = [distance.euclidean((o["final_placement"]["placed_x"], o["final_placement"]
+#         ["placed_y"]), (o["correct_x"], o["correct_y"])) * SCALE_FACTOR for o in trial_objects]
+#     final_times = [o["final_placement"]["time_ms"] for o in trial_objects]
     
-    # Get absolute distance scores
-    for i, o in enumerate(trial_objects):
-        px, py = o["final_placement"]["placed_x"], o["final_placement"]["placed_y"]
-        abs_errors.append(distance.euclidean((px, py), (o["correct_x"], o["correct_y"]))* SCALE_FACTOR) 
-        final_times.append(o["final_placement"]["time_ms"])
-        placed.append((px,py))
-        placed_indices.append(i)
+#     # permutations, swaps, and subs
+#     perm = col_ind.tolist() # col_ind tells us which 'placed' object was matched to which 'target'
+#     visited, swaps, subs = set(), 0, 0
+#     for i, p in enumerate(perm):
+#         if i == p or i in visited:
+#             continue
+#         if perm[p] == i:
+#             swaps += 1
+#             visited.update({i, p})
+#         else:
+#             subs += 1
+#             visited.add(i)
 
-    # Get best fit scores
-    cost = np.zeros((len(targets), len(placed)), dtype=float)
-    for i, (tx, ty) in enumerate(targets):
-        for j, (px, py) in enumerate(placed):
-            cost[i, j] = distance.euclidean((tx, ty), (px, py))*SCALE_FACTOR
-    row_ind, col_ind = linear_sum_assignment(cost) # get minimum distance for each object
-    matched_distances = cost[row_ind, col_ind]
+#     # neighborhood areas
+#     neighborhood_areas = neigborhood_areas(trial_objects)
 
-    # Get permutations
-    perm = list(range(len(trial_objects)))
-    for r, c in zip(row_ind, col_ind):
-        perm[r] = placed_indices[c]
-        
-    # Get swaps and subs 
-    visited, swaps, subs = set(), 0, 0
+#     return pd.DataFrame([{
+#         "absolute error score": float(np.sum(abs_errors)),
+#         "bestfit score": float(np.sum(bestfit_dists)),
+#         "final time (ms)": max(final_times),
+#         "permutations": "".join(map(str, perm)),
+#         "swaps": swaps,
+#         "substitutions": subs,
+#         "repetitions": sum(len(o.get("placements", [])) for o in trial_objects),
+#         "neighborhood_areas": neighborhood_areas
+#     }])
+
+def process_trial_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
+    """Process results at the trial level using bestfit and neighborhood logic."""
+    
+    bestfit_dists, col_ind = calculate_bestfit_distances(trial_objects)
+    final_times = [o["final_placement"]["time_ms"] for o in trial_objects]
+    
+    perm = col_ind.tolist()
+    n_objects = len(perm)
+
+    correct_idx, swap_idx, subs_idx,  = [], [], []
+    visited = set()
+
     for i, p in enumerate(perm):
+        # Correct placement
         if i == p:
+            correct_idx.append(i)
             continue
-        if p < len(trial_objects) and perm[p] == i and i not in visited:
-            swaps += 1
+        # Skip if already classified in swap
+        if i in visited:
+            continue
+        # Swap (2-cycle)
+        if perm[p] == i:
+            swap_idx.extend([i, p])
             visited.update({i, p})
-        elif i not in visited:
-            subs += 1
-            visited.add(i)
+        else:
+            subs_idx.append(i)
 
-    return  pd.DataFrame([{"absolute error score": float(np.sum(abs_errors)),
-            "bestfit score": float(np.sum(matched_distances)), 
-            "final time (ms)": max(final_times),
-            "permutations": "".join(map(str, perm)),
-            "swaps": swaps, "substitutions": subs, "repetitions": np.sum([len(o["placements"]) for o in trial_objects])}])
+    # Counts
+    n_correct = len(correct_idx)
+    n_swaps = len(swap_idx)
+    n_subs = len(subs_idx)
+    n_errors = n_swaps + n_subs
 
+    # ----- DISTANCES (in mm) -----
+    correct_distances = bestfit_dists[correct_idx].tolist() if correct_idx else []
+    swap_distances = bestfit_dists[swap_idx].tolist() if swap_idx else []
+    subs_distances = bestfit_dists[subs_idx].tolist() if subs_idx else []
+    error_distances = swap_distances + subs_distances
+
+    # Neighborhood areas
+    neighborhood_areas = neigborhood_areas(trial_objects)
+
+    return pd.DataFrame([{
+        "absolute error score": float(np.sum(bestfit_dists)),
+        "bestfit score": float(np.sum(bestfit_dists)),
+        "final time (ms)": max(final_times),
+        "permutations": "".join(map(str, perm)),
+
+        # Counts
+        "n_correct": n_correct,
+        "n_swaps": n_swaps,
+        "n_substitutions": n_subs,
+        "n_errors": n_errors,
+
+        # Distances (mm)
+        "correct_distance_mm": correct_distances,
+        "swap_distance_mm": swap_distances,
+        "substitution_distance_mm": subs_distances,
+        "error_distance_mm": error_distances,
+
+        "repetitions": sum(len(o.get("placements", [])) for o in trial_objects),
+        "neighborhood_areas": neighborhood_areas
+    }])
 
 """ -------- Analysis and graph functions --------"""
 # Averages each trial condition results of a specific variable, e.g. absolute error
@@ -262,7 +327,8 @@ def compute_trial_type_averages(folder_path, variable):
 
     dfs = []
     for f in csv_files:
-        df = pd.read_csv(f)
+        #df = pd.read_csv(f)
+        df = pd.read_pickle(f)
         dfs.append(df)
 
     all_data = pd.concat(dfs, ignore_index=True)
@@ -278,8 +344,8 @@ def compute_trial_type_averages(folder_path, variable):
 
     return summary
 
-# TODO mirar si fem servir aixo 
-def load_trial_level_data(folder_path, group_label):
+# Loads trial and object level data
+def load_data(folder_path, group_label):
     csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
     if len(csv_files) == 0:
         raise ValueError(f"No CSV files found in {folder_path}")
@@ -292,7 +358,8 @@ def load_trial_level_data(folder_path, group_label):
             raise ValueError(f"Cannot extract participant ID from: {filename}")
 
         participant_id = int(match.group())
-        df = pd.read_csv(f)
+        # df = pd.read_csv(f)
+        df = pd.read_pickle(f)
         df["ID"] = participant_id
         df["group"] = group_label
         if "obj" in f:
@@ -307,3 +374,8 @@ def load_trial_level_data(folder_path, group_label):
     data_trials["trial type"] = data_trials["trial type"].replace({"DB": "B"})
     data_trials = data_trials[~data_trials["trial type"].isin(["C", "P"])]
     return data_obj,data_trials
+
+
+
+
+import matplotlib.pyplot as plt
