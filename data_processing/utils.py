@@ -258,7 +258,7 @@ def process_object_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
 
 def process_trial_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
     """Process results at the trial level using bestfit and neighborhood logic."""
-    
+    abs_errors = [distance.euclidean((o["final_placement"]["placed_x"], o["final_placement"]["placed_y"]), (o["correct_x"], o["correct_y"])) * SCALE_FACTOR for o in trial_objects]
     bestfit_dists, col_ind = calculate_bestfit_distances(trial_objects)
     final_times = [o["final_placement"]["time_ms"] for o in trial_objects]
     
@@ -299,7 +299,7 @@ def process_trial_results(trial_objects, threshold_px=DIST_THRESHOLD_PX):
     neighborhood_areas = neigborhood_areas(trial_objects)
 
     return pd.DataFrame([{
-        "absolute error score": float(np.sum(bestfit_dists)),
+        "absolute error score": float(np.sum(abs_errors)),
         "bestfit score": float(np.sum(bestfit_dists)),
         "final time (ms)": max(final_times),
         "permutations": "".join(map(str, perm)),
